@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HSE | Hyper-Synthesis Engine (Standalone)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+              mono: ['JetBrains Mono', 'monospace'],
+            },
+            animation: {
+              'pulse-fast': 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            }
+          },
+        },
+      }
+    </script>
+    <!-- Babel for JSX transformation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Import Map for Modules -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.263.1",
+        "@google/genai": "https://esm.sh/@google/genai@0.1.1"
+      }
+    }
+    </script>
+    <style>
+        /* Custom scrollbar for webkit */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #18181b; }
+        ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+    </style>
+</head>
+<body class="bg-zinc-950 text-white antialiased">
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef, useCallback } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            Bot, Loader2, Cpu, Activity, AlertCircle, Mic, MicOff, 
+            Zap, Code, ImageIcon, ExternalLink, Terminal, Copy, Check, 
+            RefreshCw, Wand2, Key 
+        } from 'lucide-react';
+        import { GoogleGenAI } from "@google/genai";
+
+        // --- SERVICES ---
+        const TEXT_MODEL = "gemini-2.5-flash";
+        const CODING_MODEL = "gemini-3-pro-preview"; 
+        const IMAGE_MODEL = "gemini-2.5-flash-image";
+
+        const runGeminiOperation = async (mode, prompt, apiKey) => {
+            if (!apiKey) throw new Error("API Key is required");
+            
+            const ai = new GoogleGenAI({ apiKey });
+            const startTime = performance.now();
+            let result = {
+                content: "",
+                mode,
+                model: "",
+                latency: "0",
+                type: "TEXT",
+                sources: [],
+            };
+
+            try {
+                switch (mode) {
+                    case 'TURBO_SEARCH':
+                        result = await handleTurboSearch(ai, prompt);
+                        break;
+                    case 'APP_GAME_GEN':
+                        result = await handleAppGeneration(ai, prompt);
+                        break;
+                    case 'HYPER_IMAGE_GEN':
+                        result = await handleImageGeneration(ai, prompt);
+                        break;
+                    default:
+                        throw new Error("Invalid operation mode.");
+                }
+            } catch (error) {
+                console.error("Gemini Operation Error:", error);
+                throw error;
+            }
+
+            const endTime = performance.now();
+            result.latency = (endTime - startTime).toFixed(0);
+            return result;
+        };
+
+        const refineAppGeneration = async (originalCode, refinementPrompt, apiKey) => {
+             if (!apiKey) throw new Error("API Key is required");
+             const ai = new GoogleGenAI({ apiKey });
+             const startTime = performance.now();
+             const model = CODING_MODEL;
+             
+             const fullPrompt = `Here is an existing single-file HTML application:
+             
+           \`\`\`html
+           ${originalCode}
+           \`\`\`
+           
+           Refinement Instruction: "${refinementPrompt}"
+           
+           Task:
+           1. Update the application based *strictly* on the refinement instruction.
+           2. Maintain the single-file HTML format (HTML + Inline CSS + Inline JS).
+           3. Ensure the code remains complete and runnable.
+           4. Output ONLY the raw HTML code enclosed in a markdown code block. Do not add explanations.`;
+           
+             const response = await ai.models.generateContent({
+               model: model,
+               contents: fullPrompt,
+               config: {
+                 systemInstruction: "You are an expert senior frontend engineer. You update code precisely and maintain high quality standards.",
+               },
+             });
+           
+             const text = response.text || "";
+             const endTime = performance.now();
+           
+             return {
+               content: text,
+               mode: 'APP_GAME_GEN',
+               model: model,
+               latency: (endTime - startTime).toFixed(0),
+               type: 'HTML',
+             };
+        };
+
+        async function handleTurboSearch(ai, prompt) {
+            const model = TEXT_MODEL;
+            const response = await ai.models.generateContent({
+                model: model,
+                contents: prompt,
+                config: {
+                    systemInstruction: "You are the 'Turbo Search' mode. Execute the user's query by synthesizing real-time information with maximum speed. Provide citations.",
+                    tools: [{ googleSearch: {} }],
+                },
+            });
+
+            const text = response.text || "No content generated.";
+            const sources = [];
+            const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+            
+            if (chunks) {
+                chunks.forEach((chunk) => {
+                    if (chunk.web?.uri && chunk.web?.title) {
+                        sources.push({
+                            uri: chunk.web.uri,
+                            title: chunk.web.title
+                        });
+                    }
+                });
+            }
+
+            return {
+                content: text,
+                mode: 'TURBO_SEARCH',
+                model: model,
+                latency: "0",
+                type: 'TEXT',
+                sources,
+            };
+        }
+
+        async function handleAppGeneration(ai, prompt) {
+            const model = CODING_MODEL;
+            const fullPrompt = `Create a complete, runnable, single-file application or game based on this request: "${prompt}".
+            
+            Requirements:
+            1. Use HTML, inline CSS (Tailwind allowed via CDN), and inline JavaScript.
+            2. The code MUST be self-contained in a single HTML file.
+            3. Ensure excellent mobile design and playability/usability.
+            4. Output ONLY the raw HTML code enclosed in a markdown code block.`;
+
+            const response = await ai.models.generateContent({
+                model: model,
+                contents: fullPrompt,
+                config: {
+                    systemInstruction: "You are the 'App/Game Generator' mode. You generate functional, polished single-file HTML applications.",
+                },
+            });
+
+            return {
+                content: response.text || "",
+                mode: 'APP_GAME_GEN',
+                model: model,
+                latency: "0",
+                type: 'HTML',
+            };
+        }
+
+        async function handleImageGeneration(ai, prompt) {
+            const model = IMAGE_MODEL;
+            try {
+                const response = await ai.models.generateContent({
+                    model: model,
+                    contents: prompt,
+                });
+                
+                let imageUrl = "";
+                const parts = response.candidates?.[0]?.content?.parts;
+                if (parts) {
+                    for (const part of parts) {
+                        if (part.inlineData && part.inlineData.data) {
+                            imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                            break;
+                        }
+                    }
+                }
+
+                if(imageUrl) {
+                    return {
+                        content: imageUrl,
+                        mode: 'HYPER_IMAGE_GEN',
+                        model: model,
+                        latency: "0",
+                        type: 'IMAGE',
+                    };
+                }
+                
+                return {
+                    content: "No image data returned. The model might have returned text instead: " + (response.text || "No Data"),
+                    mode: 'HYPER_IMAGE_GEN',
+                    model: model,
+                    latency: "0",
+                    type: 'TEXT' 
+                };
+
+            } catch(e) {
+                 return {
+                    content: "Image generation failed. Error: " + e.message,
+                    mode: 'HYPER_IMAGE_GEN',
+                    model: model,
+                    latency: "0",
+                    type: 'TEXT'
+                };
+            }
+        }
+
+        // --- COMPONENTS ---
+
+        const ModeSelector = ({ currentMode, onModeSelect, disabled }) => {
+            const MODES = [
+                { id: 'TURBO_SEARCH', label: 'Turbo Search', icon: Zap, description: 'Real-time synthesis' },
+                { id: 'APP_GAME_GEN', label: 'App Gen', icon: Code, description: 'Functional HTML/JS' },
+                { id: 'HYPER_IMAGE_GEN', label: 'Hyper Image', icon: ImageIcon, description: 'Visual synthesis' },
+            ];
+
+            return (
+                <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4 p-2 bg-zinc-900 rounded-xl shadow-inner shadow-zinc-950/50 border border-zinc-800">
+                    {MODES.map((mode) => {
+                        const Icon = mode.icon;
+                        const isSelected = currentMode === mode.id;
+                        return (
+                            <button
+                                key={mode.id}
+                                onClick={() => onModeSelect(mode.id)}
+                                disabled={disabled}
+                                className={`
+                                    relative flex-1 group overflow-hidden rounded-lg p-3 transition-all duration-300 ease-out
+                                    border-2 
+                                    ${isSelected 
+                                        ? 'bg-indigo-900/40 border-indigo-500 shadow-[0_0_20px_rgba(99,102,241,0.3)]' 
+                                        : 'bg-zinc-800/50 border-transparent hover:bg-zinc-800 hover:border-zinc-700'
+                                    }
+                                    ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                                `}
+                            >
+                                <div className="flex items-center justify-center sm:justify-start space-x-3 z-10 relative">
+                                    <div className={`p-2 rounded-md ${isSelected ? 'bg-indigo-500 text-white' : 'bg-zinc-700 text-zinc-400 group-hover:text-indigo-300'}`}>
+                                        <Icon className="w-5 h-5" />
+                                    </div>
+                                    <div className="text-left">
+                                        <div className={`text-sm font-bold ${isSelected ? 'text-white' : 'text-zinc-300'}`}>
+                                            {mode.label}
+                                        </div>
+                                        <div className={`text-[10px] uppercase tracking-wider font-mono hidden sm:block ${isSelected ? 'text-indigo-300' : 'text-zinc-500'}`}>
+                                            {mode.description}
+                                        </div>
+                                    </div>
+                                </div>
+                            </button>
+                        );
+                    })}
+                </div>
+            );
+        };
+
+        const OutputViewer = ({ result, onRefine }) => {
+            const [copied, setCopied] = useState(false);
+            const [refinePrompt, setRefinePrompt] = useState('');
+            const [isRefining, setIsRefining] = useState(false);
+
+            useEffect(() => {
+                setCopied(false);
+                setRefinePrompt('');
+                setIsRefining(false);
+            }, [result]);
+
+            if (!result) return null;
+
+            const extractCode = (text) => {
+                const regex = /```html\s*([\s\S]*?)\n```/i;
+                const match = text.match(regex);
+                return match && match[1] ? match[1].trim() : text.replace(/```html/g, '').replace(/```/g, '').trim();
+            };
+
+            const handleCopy = (code) => {
+                navigator.clipboard.writeText(code);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+            };
+
+            const handleRefineSubmit = async () => {
+                if (!refinePrompt.trim() || !onRefine) return;
+                setIsRefining(true);
+                try {
+                    await onRefine(refinePrompt);
+                    setRefinePrompt('');
+                } catch (e) {
+                    console.error("Refinement failed", e);
+                } finally {
+                    setIsRefining(false);
+                }
+            };
+
+            const renderContent = () => {
+                switch (result.type) {
+                    case 'IMAGE':
+                        return (
+                            <div className="relative group rounded-lg overflow-hidden border-2 border-indigo-500/30 bg-zinc-950">
+                                <img src={result.content} alt="Generated Output" className="w-full h-auto object-contain max-h-[70vh] mx-auto" />
+                            </div>
+                        );
+
+                    case 'HTML':
+                        const rawHtml = extractCode(result.content);
+                        return (
+                            <div className="space-y-4">
+                                <div className="border border-indigo-500/50 rounded-lg overflow-hidden bg-zinc-900 shadow-2xl">
+                                    <div className="bg-zinc-800 px-4 py-2 flex items-center justify-between border-b border-zinc-700">
+                                        <div className="flex items-center space-x-2">
+                                            <div className="w-3 h-3 rounded-full bg-red-500/50"></div>
+                                            <div className="w-3 h-3 rounded-full bg-yellow-500/50"></div>
+                                            <div className="w-3 h-3 rounded-full bg-green-500/50"></div>
+                                            <span className="ml-3 text-xs font-mono text-zinc-400">preview.html</span>
+                                        </div>
+                                        <div className="px-2 py-0.5 rounded bg-indigo-900/50 border border-indigo-500/30 text-[10px] font-mono text-indigo-300">INTERACTIVE</div>
+                                    </div>
+                                    <div className="w-full h-[500px] bg-white">
+                                        <iframe srcDoc={rawHtml} sandbox="allow-scripts allow-modals allow-forms allow-popups allow-same-origin" className="w-full h-full" title="App Preview" />
+                                    </div>
+                                </div>
+
+                                <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 overflow-hidden">
+                                    <div className="px-4 py-2 border-b border-zinc-800 bg-zinc-900/50 flex items-center justify-between">
+                                        <div className="flex items-center space-x-2">
+                                            <Terminal className="w-4 h-4 text-zinc-500" />
+                                            <span className="text-xs font-mono text-zinc-500">SOURCE CODE</span>
+                                        </div>
+                                        <button onClick={() => handleCopy(rawHtml)} className="flex items-center space-x-1.5 px-2 py-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-indigo-400 transition-colors group">
+                                            {copied ? <Check className="w-3 h-3 text-green-500" /> : <Copy className="w-3 h-3 group-hover:text-indigo-400" />}
+                                            <span className={`text-[10px] font-mono font-bold ${copied ? 'text-green-500' : 'group-hover:text-indigo-400'}`}>{copied ? 'COPIED' : 'COPY'}</span>
+                                        </button>
+                                    </div>
+                                    <pre className="p-4 text-xs text-indigo-300 font-mono overflow-x-auto whitespace-pre-wrap max-h-60 scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent">{rawHtml}</pre>
+                                </div>
+
+                                {onRefine && (
+                                    <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 space-y-3">
+                                        <div className="flex items-center space-x-2 text-zinc-400">
+                                            <Wand2 className="w-4 h-4" />
+                                            <span className="text-xs font-bold tracking-wider">ITERATE & REFINE</span>
+                                        </div>
+                                        <div className="flex flex-col sm:flex-row gap-3">
+                                            <input
+                                                type="text"
+                                                value={refinePrompt}
+                                                onChange={(e) => setRefinePrompt(e.target.value)}
+                                                onKeyDown={(e) => e.key === 'Enter' && handleRefineSubmit()}
+                                                placeholder="Describe changes (e.g., 'Make the background blue')..."
+                                                className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                                                disabled={isRefining}
+                                            />
+                                            <button
+                                                onClick={handleRefineSubmit}
+                                                disabled={isRefining || !refinePrompt.trim()}
+                                                className={`px-4 py-2 rounded text-xs font-bold tracking-wide transition-all flex items-center justify-center space-x-2 min-w-[120px] ${isRefining || !refinePrompt.trim() ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-500'}`}
+                                            >
+                                                {isRefining ? <><RefreshCw className="w-3 h-3 animate-spin" /><span>UPDATING</span></> : <span>UPDATE APP</span>}
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+
+                    case 'TEXT':
+                    default:
+                        return (
+                            <div className="prose prose-invert prose-indigo max-w-none">
+                                <div className="bg-zinc-900/50 p-6 rounded-lg border border-zinc-800 text-zinc-300 font-sans leading-relaxed whitespace-pre-wrap">{result.content}</div>
+                                {result.sources && result.sources.length > 0 && (
+                                    <div className="mt-6 border-t border-zinc-800 pt-4">
+                                        <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3">Grounding Sources</h4>
+                                        <div className="grid gap-2 grid-cols-1 sm:grid-cols-2">
+                                            {result.sources.map((source, idx) => (
+                                                <a key={idx} href={source.uri} target="_blank" rel="noopener noreferrer" className="flex items-center space-x-2 p-2 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-indigo-500/50 transition-all group">
+                                                    <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded bg-zinc-800 text-zinc-500 text-[10px] font-mono group-hover:text-indigo-400">{idx + 1}</span>
+                                                    <span className="text-xs text-zinc-400 truncate group-hover:text-zinc-200">{source.title || source.uri}</span>
+                                                    <ExternalLink className="w-3 h-3 text-zinc-600 group-hover:text-indigo-500 ml-auto" />
+                                                </a>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                }
+            };
+
+            return <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">{renderContent()}</div>;
+        };
+
+        const ApiKeyModal = ({ onSave }) => {
+            const [key, setKey] = useState('');
+
+            return (
+                <div className="fixed inset-0 z-[100] bg-zinc-950/90 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 max-w-md w-full shadow-2xl">
+                        <div className="flex items-center space-x-3 mb-6">
+                            <div className="bg-indigo-600 p-2 rounded-lg"><Key className="w-6 h-6 text-white" /></div>
+                            <div>
+                                <h2 className="text-xl font-bold text-white">API Configuration</h2>
+                                <p className="text-xs text-zinc-400">Google Gemini API Key Required</p>
+                            </div>
+                        </div>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-mono text-zinc-500 uppercase tracking-wider mb-2">Enter API Key</label>
+                                <input 
+                                    type="password" 
+                                    value={key} 
+                                    onChange={(e) => setKey(e.target.value)} 
+                                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+                                    placeholder="AIza..."
+                                />
+                            </div>
+                            <p className="text-[11px] text-zinc-500 leading-relaxed">
+                                Your key is saved locally in your browser. It is never sent to our servers.
+                                <br />
+                                <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-indigo-400 hover:text-indigo-300 underline">Get a key from Google AI Studio</a>
+                            </p>
+                            <button 
+                                onClick={() => onSave(key)}
+                                disabled={!key.trim()}
+                                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 rounded-lg transition-all"
+                            >
+                                INITIALIZE ENGINE
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- MAIN APP ---
+
+        const App = () => {
+            const [prompt, setPrompt] = useState('');
+            const [mode, setMode] = useState('APP_GAME_GEN');
+            const [loading, setLoading] = useState(false);
+            const [result, setResult] = useState(null);
+            const [error, setError] = useState(null);
+            const [apiKey, setApiKey] = useState('');
+            const [isListening, setIsListening] = useState(false);
+            const recognitionRef = useRef(null);
+
+            useEffect(() => {
+                const storedKey = localStorage.getItem('hse_api_key');
+                if (storedKey) setApiKey(storedKey);
+
+                if (window.SpeechRecognition || window.webkitSpeechRecognition) {
+                    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                    recognitionRef.current = new SpeechRecognition();
+                    recognitionRef.current.continuous = true;
+                    recognitionRef.current.interimResults = false;
+                    recognitionRef.current.onstart = () => setIsListening(true);
+                    recognitionRef.current.onend = () => setIsListening(false);
+                    recognitionRef.current.onresult = (event) => {
+                        let newTranscript = '';
+                        for (let i = event.resultIndex; i < event.results.length; ++i) {
+                            if (event.results[i].isFinal) newTranscript += event.results[i][0].transcript;
+                        }
+                        if (newTranscript) {
+                            setPrompt(prev => {
+                                const spacing = prev && !prev.endsWith(' ') && !prev.endsWith('\n') ? ' ' : '';
+                                return prev + spacing + newTranscript;
+                            });
+                        }
+                    };
+                }
+            }, []);
+
+            const handleSaveKey = (key) => {
+                if(key.trim()) {
+                    localStorage.setItem('hse_api_key', key.trim());
+                    setApiKey(key.trim());
+                }
+            };
+
+            const toggleListening = () => {
+                if (!recognitionRef.current) return alert("Voice input not supported.");
+                isListening ? recognitionRef.current.stop() : recognitionRef.current.start();
+            };
+
+            const handleExecute = async () => {
+                if (!prompt.trim()) { setError("Please input a command directive."); return; }
+                setLoading(true); setError(null); setResult(null);
+                try {
+                    const res = await runGeminiOperation(mode, prompt, apiKey);
+                    setResult(res);
+                } catch (e) {
+                    setError(e.message || "An unknown system error occurred.");
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleRefine = async (refinementPrompt) => {
+                if (!result || result.type !== 'HTML') return;
+                setError(null);
+                try {
+                    const newResult = await refineAppGeneration(result.content, refinementPrompt, apiKey);
+                    setResult(newResult);
+                } catch (e) {
+                    setError(e.message || "Refinement failed.");
+                }
+            };
+            
+            const handleKeyDown = (e) => {
+                if (e.key === 'Enter' && e.ctrlKey) {
+                  handleExecute();
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900 via-zinc-950 to-zinc-950 text-white font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
+                    {!apiKey && <ApiKeyModal onSave={handleSaveKey} />}
+                    
+                    <header className="sticky top-0 z-50 backdrop-blur-md bg-zinc-950/80 border-b border-zinc-800">
+                        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+                            <div className="flex items-center space-x-3">
+                                <div className="bg-indigo-600 p-1.5 rounded-lg shadow-[0_0_15px_rgba(79,70,229,0.5)]"><Bot className="w-6 h-6 text-white" /></div>
+                                <div>
+                                    <h1 className="text-lg font-bold tracking-tight text-white leading-none">HSE <span className="text-zinc-500 font-normal">|</span> v2.5</h1>
+                                    <p className="text-[10px] font-mono text-indigo-400 tracking-widest uppercase">Hyper-Synthesis Engine</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center space-x-4">
+                                <div className="hidden sm:flex items-center space-x-2 text-[10px] font-mono text-zinc-500 border border-zinc-800 rounded-full px-3 py-1 bg-zinc-900/50">
+                                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                                    <span>SYSTEM ONLINE</span>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12 space-y-8">
+                        <section className="space-y-6">
+                            <ModeSelector currentMode={mode} onModeSelect={setMode} disabled={loading} />
+                            <div className="relative group">
+                                <div className="absolute -inset-0.5 bg-gradient-to-r from-indigo-500 to-cyan-500 rounded-xl opacity-20 group-hover:opacity-40 transition duration-500 blur"></div>
+                                <div className="relative bg-zinc-900 rounded-xl border border-zinc-800 shadow-xl overflow-hidden">
+                                    <div className="px-4 py-2 bg-zinc-950 border-b border-zinc-800 flex justify-between items-center">
+                                        <div className="flex items-center space-x-4">
+                                            <label className="text-xs font-mono text-zinc-400 uppercase tracking-widest">Command Input</label>
+                                        </div>
+                                        <div className="flex items-center space-x-3">
+                                            <button 
+                                                onClick={toggleListening} 
+                                                className={`flex items-center space-x-1.5 px-2 py-0.5 rounded-md transition-all duration-300 ${isListening ? 'bg-red-500/10 text-red-500 border border-red-500/50' : 'text-zinc-500 hover:text-indigo-400 hover:bg-zinc-900'}`}
+                                                title={isListening ? "Stop listening" : "Start voice input"}
+                                            >
+                                                {isListening ? <Mic className="w-3 h-3 animate-pulse" /> : <MicOff className="w-3 h-3" />}
+                                                <span className="text-[10px] font-mono font-bold tracking-wider">{isListening ? 'LISTENING' : 'VOICE'}</span>
+                                            </button>
+                                            <span className="text-[10px] text-zinc-600 font-mono hidden sm:block pl-3 border-l border-zinc-800">CTRL + ENTER</span>
+                                        </div>
+                                    </div>
+                                    <textarea
+                                        value={prompt}
+                                        onChange={(e) => setPrompt(e.target.value)}
+                                        onKeyDown={handleKeyDown}
+                                        placeholder={
+                                          mode === 'TURBO_SEARCH' ? "Enter search query..." :
+                                          mode === 'APP_GAME_GEN' ? "Describe app logic..." :
+                                          "Describe visual output..."
+                                        }
+                                        className="w-full bg-zinc-900/50 text-indigo-100 p-4 h-32 focus:outline-none focus:bg-zinc-900 transition-colors font-mono text-sm resize-none"
+                                        disabled={loading}
+                                    />
+                                    <div className="p-2 bg-zinc-950 border-t border-zinc-800 flex justify-end">
+                                        <button
+                                            onClick={handleExecute}
+                                            disabled={loading}
+                                            className={`px-6 py-2 rounded-lg font-bold text-sm tracking-wide transition-all duration-300 flex items-center space-x-2 ${loading ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_20px_rgba(79,70,229,0.4)] hover:shadow-[0_0_30px_rgba(79,70,229,0.6)]'}`}
+                                        >
+                                            {loading ? <><Loader2 className="w-4 h-4 animate-spin" /><span>SYNTHESIZING...</span></> : <><Cpu className="w-4 h-4" /><span>EXECUTE</span></>}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        {error && (
+                            <div className="rounded-lg bg-red-950/30 border border-red-500/50 p-4 flex items-start space-x-3 text-red-200 animate-in fade-in slide-in-from-top-2">
+                                <AlertCircle className="w-5 h-5 flex-shrink-0 text-red-500 mt-0.5" />
+                                <div className="flex-1">
+                                    <h3 className="text-sm font-bold text-red-400 mb-1">EXECUTION ERROR</h3>
+                                    <p className="text-xs font-mono">{error}</p>
+                                </div>
+                            </div>
+                        )}
+
+                        {result && (
+                            <section className="space-y-4">
+                                <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+                                    <div className="flex items-center space-x-2 text-indigo-400"><Activity className="w-4 h-4" /><h2 className="text-sm font-bold tracking-wider">OUTPUT LOG</h2></div>
+                                    <div className="flex items-center space-x-4 text-[10px] font-mono text-zinc-500"><span>LATENCY: {result.latency}ms</span><span className="hidden sm:inline">MODEL: {result.model}</span></div>
+                                </div>
+                                <OutputViewer result={result} onRefine={handleRefine} />
+                            </section>
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
